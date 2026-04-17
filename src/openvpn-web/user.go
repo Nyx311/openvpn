@@ -189,7 +189,7 @@ func (u *User) Login(clogin bool) error {
 			}
 
 			if u.IpAddr != "" {
-				os.WriteFile(path.Join(ovData, ".ovip"), []byte(u.IpAddr), 0644)
+				os.WriteFile(path.Join(ovData, ".ovip_"+user), []byte(u.IpAddr), 0644)
 			}
 
 			var ovconfig sql.NullString
@@ -219,7 +219,7 @@ func (u *User) Login(clogin bool) error {
 			`, u.Gid).Scan(&ovconfig)
 
 			if ovconfig.Valid {
-				os.WriteFile(path.Join(ovData, ".ovc"), []byte(ovconfig.String), 0644)
+				os.WriteFile(path.Join(ovData, ".ovc_"+user), []byte(ovconfig.String), 0644)
 			}
 		}
 

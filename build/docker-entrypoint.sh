@@ -5,8 +5,14 @@ SYSTEM_CONFIG="$OVPN_DATA/config.json"
 export EASYRSA_PKI="$OVPN_DATA/pki"
 
 init_pki() {
-	SERVER_NAME=$(jq -r '.system.base.server_name // ""' $SYSTEM_CONFIG)
-	SERVER_CN=$(jq -r '.system.base.server_cn // ""' $SYSTEM_CONFIG)
+	SERVER_NAME=$(jq -r '.system.base.server_name // ""' $SYSTEM_CONFIG 2>/dev/null)
+	SERVER_CN=$(jq -r '.system.base.server_cn // ""' $SYSTEM_CONFIG 2>/dev/null)
+	if [ -z "$SERVER_NAME" ]; then
+		SERVER_NAME="server_$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 16)"
+	fi
+	if [ -z "$SERVER_CN" ]; then
+		SERVER_CN="ovpn_$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 16)"
+	fi
 	cd $OVPN_DATA && /usr/share/easy-rsa/easyrsa init-pki
 
 	cat <<EOF >$EASYRSA_PKI/vars
@@ -25,16 +31,17 @@ EOF
 }
 
 init_config() {
-	SERVER_NAME=$(jq -r '.system.base.server_name // ""' $SYSTEM_CONFIG)
-	OVPN_PORT=$(jq -r '.openvpn.ovpn_port // "1194"' $SYSTEM_CONFIG)
-	OVPN_PROTO=$(jq -r '.openvpn.ovpn_proto // "udp"' $SYSTEM_CONFIG)
-	OVPN_MAXCLIENTS=$(jq -r '.openvpn.ovpn_maxclients // "200"' $SYSTEM_CONFIG)
-	OVPN_MANAGEMENT=$(jq -r '.openvpn.ovpn_management // "127.0.0.1:7505"' $SYSTEM_CONFIG)
-	OVPN_IPV6=$(jq -r '.openvpn.ovpn_ipv6 // "false"' $SYSTEM_CONFIG)
-	OVPN_GATEWAY=$(jq -r '.openvpn.ovpn_gateway // "false"' $SYSTEM_CONFIG)
-	OVPN_SUBNET=$(jq -r '.openvpn.ovpn_subnet // "10.8.0.0/24"' $SYSTEM_CONFIG)
-	OVPN_SUBNET6=$(jq -r '.openvpn.ovpn_subnet6 // "fdaf:f178:e916:6dd0::/64"' $SYSTEM_CONFIG)
-	WEB_PORT=$(jq -r '.system.base.web_port // "8833"' $SYSTEM_CONFIG)
+	SERVER_NAME=$(jq -r '.system.base.server_name // ""' $SYSTEM_CONFIG 2>/dev/null)
+	if [ -z "$SERVER_NAME" ]; then SERVER_NAME="server_$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 16)"; fi
+	OVPN_PORT=$(jq -r '.openvpn.ovpn_port // "1194"' $SYSTEM_CONFIG 2>/dev/null || echo "1194")
+	OVPN_PROTO=$(jq -r '.openvpn.ovpn_proto // "udp"' $SYSTEM_CONFIG 2>/dev/null || echo "udp")
+	OVPN_MAXCLIENTS=$(jq -r '.openvpn.ovpn_maxclients // "200"' $SYSTEM_CONFIG 2>/dev/null || echo "200")
+	OVPN_MANAGEMENT=$(jq -r '.openvpn.ovpn_management // "127.0.0.1:7505"' $SYSTEM_CONFIG 2>/dev/null || echo "127.0.0.1:7505")
+	OVPN_IPV6=$(jq -r '.openvpn.ovpn_ipv6 // "false"' $SYSTEM_CONFIG 2>/dev/null || echo "false")
+	OVPN_GATEWAY=$(jq -r '.openvpn.ovpn_gateway // "false"' $SYSTEM_CONFIG 2>/dev/null || echo "false")
+	OVPN_SUBNET=$(jq -r '.openvpn.ovpn_subnet // "10.8.0.0/24"' $SYSTEM_CONFIG 2>/dev/null || echo "10.8.0.0/24")
+	OVPN_SUBNET6=$(jq -r '.openvpn.ovpn_subnet6 // "fdaf:f178:e916:6dd0::/64"' $SYSTEM_CONFIG 2>/dev/null || echo "fdaf:f178:e916:6dd0::/64")
+	WEB_PORT=$(jq -r '.system.base.web_port // "8833"' $SYSTEM_CONFIG 2>/dev/null || echo "8833")
 
 	cat <<EOF >$OVPN_DATA/server.conf
 port $OVPN_PORT
@@ -217,7 +224,7 @@ add_history() {
 
 set_ovip() {
 	cc_file="$1"
-	ip_file="$ovpn_data/.ovip"
+	ip_file="$ovpn_data/.ovip_$username"
 
 	if [ -f "$ip_file" ]; then
 		ipaddr=$(cat $ip_file)
@@ -230,7 +237,7 @@ set_ovip() {
 
 set_ovconfig() {
 	cc_file="$1"
-	ovc_file="$ovpn_data/.ovc"
+	ovc_file="$ovpn_data/.ovc_$username"
 
 	if [ -f "$ovc_file" ]; then
 		ovconfig=$(cat $ovc_file)
@@ -243,7 +250,7 @@ set_ovconfig() {
 
 load_nftconfig() {
 	NFT_CONFIG="$OVPN_DATA/openvpn.nft"
-	TABLE=$(jq -r '.system.base.nft_table_name // "openvpn-nft"' $SYSTEM_CONFIG)
+	TABLE=$(jq -r '.system.base.nft_table_name // "openvpn-nft"' $SYSTEM_CONFIG 2>/dev/null || echo "openvpn-nft")
 
 	[ ! -f $NFT_CONFIG ] && cat <<EOF >$NFT_CONFIG
 table inet $TABLE {
@@ -253,6 +260,16 @@ table inet $TABLE {
 
 	set blacklist_v6 {
 		type ipv6_addr
+	}
+
+	set isolate_clients_v4 {
+		type ipv4_addr
+		flags interval
+	}
+
+	set isolate_clients_v6 {
+		type ipv6_addr
+		flags interval
 	}
 
 	chain forward {
@@ -271,7 +288,7 @@ table inet $TABLE {
 }
 EOF
 
-	nft -f $NFT_CONFIG
+	nft -f $NFT_CONFIG || true
 }
 
 set_firewall() {

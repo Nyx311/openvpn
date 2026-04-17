@@ -294,9 +294,182 @@ $('#showClient').click(function () {
   initTable('client');
 });
 
-$('#showFirewall').click(function () {
+$('#showFirewall').click(async function () {
+  const nftData = await request.get('/ovpn/firewall?a=check_nft');
+  if (!nftData.available) {
+    message.warning('nftables 未正常加载，防火墙/限速/隔离功能不可用', 0);
+  }
   window.history.pushState(null, '', '?tab=firewall');
   initTable('firewall');
+});
+
+$('#showClientIsolate').click(async function () {
+  const nftData = await request.get('/ovpn/firewall?a=check_nft');
+  if (!nftData.available) {
+    message.warning('nftables 未正常加载，防火墙/限速/隔离功能不可用', 0);
+  }
+  loadClientIsolate();
+  $('#clientIsolateModal').modal('show');
+});
+
+// 加载客户端隔离设置和白名单
+async function loadClientIsolate() {
+  // 加载隔离开关状态
+  const isolateData = await request.get('/ovpn/firewall?a=get_isolate');
+  $('#isolateSwitch').prop('checked', isolateData.isolate);
+
+  // 加载白名单列表
+  const whitelistData = await request.get('/ovpn/firewall?a=get_whitelist');
+  renderWhitelistTable(whitelistData);
+}
+
+// 渲染白名单表格
+function renderWhitelistTable(data) {
+  const tbody = $('#whitelistTableBody');
+  tbody.empty();
+
+  if (data.length === 0) {
+    tbody.html('<tr><td colspan="6" class="text-center text-muted">暂无数据</td></tr>');
+    return;
+  }
+
+  data.forEach((item) => {
+    const groups = item.groups.map((g) => g.name).join(', ') || '-';
+    const status = item.status
+      ? '<span class="badge text-bg-success">启用</span>'
+      : '<span class="badge text-bg-danger">禁用</span>';
+    const createdAt = dayjs(item.createdAt).format('YYYY-MM-DD HH:mm:ss');
+
+    tbody.append(`
+      <tr>
+        <td>${item.id}</td>
+        <td>${item.name}</td>
+        <td class="text-truncate" style="max-width: 200px" title="${groups}">${groups}</td>
+        <td>${status}</td>
+        <td>${createdAt}</td>
+        <td>
+          <button class="btn btn-link text-decoration-none p-0 me-2" onclick="editWhitelist(${item.id})">编辑</button>
+          <button class="btn btn-link text-decoration-none p-0 text-danger" onclick="deleteWhitelist(${item.id})">删除</button>
+        </td>
+      </tr>
+    `);
+  });
+}
+
+// 隔离开关切换
+$('#isolateSwitch').change(async function () {
+  const isolate = $(this).prop('checked');
+  try {
+    await request.post('/ovpn/firewall?a=set_isolate', { isolate: isolate.toString() });
+    message.success('设置成功');
+  } catch (e) {
+    message.error('设置失败');
+    $(this).prop('checked', !isolate);
+  }
+});
+
+// 添加白名单按钮
+$('#addWhitelistBtn').click(async function () {
+  $('#whitelistForm')[0].reset();
+  $('#whitelistForm input[name="id"]').val('');
+  $('#whitelistModalTitle').text('添加互连白名单');
+  $('#whitelistStatus').prop('checked', true);
+
+  // 加载用户组列表
+  const groups = await request.get('/ovpn/group');
+  const select = $('#whitelistGroupsSelect');
+  select.empty();
+  groups.forEach((g) => {
+    select.append(new Option(g.name, g.id));
+  });
+
+  $('#addWhitelistModal').modal('show');
+});
+
+// 编辑白名单
+window.editWhitelist = async function (id) {
+  const data = await request.get('/ovpn/firewall?a=get_whitelist');
+  const item = data.find((w) => w.id === id);
+  if (!item) {
+    message.error('未找到该白名单');
+    return;
+  }
+
+  $('#whitelistForm')[0].reset();
+  $('#whitelistForm input[name="id"]').val(item.id);
+  $('#whitelistForm input[name="name"]').val(item.name);
+  $('#whitelistStatus').prop('checked', item.status);
+  $('#whitelistModalTitle').text('编辑互连白名单');
+
+  // 加载用户组列表并选中已有的组
+  const groups = await request.get('/ovpn/group');
+  const select = $('#whitelistGroupsSelect');
+  select.empty();
+  const selectedIds = item.groups.map((g) => g.id);
+  groups.forEach((g) => {
+    select.append(new Option(g.name, g.id));
+  });
+  select.val(selectedIds);
+
+  $('#addWhitelistModal').modal('show');
+};
+
+// 删除白名单
+window.deleteWhitelist = async function (id) {
+  if (!confirm('确认删除该白名单？')) return;
+
+  try {
+    await request.delete(`/ovpn/firewall?whitelist_id=${id}`);
+    message.success('删除成功');
+    loadClientIsolate();
+  } catch (e) {
+    message.error('删除失败');
+  }
+};
+
+// 白名单表单提交
+$('#whitelistForm').submit(async function (e) {
+  e.preventDefault();
+
+  const id = $(this).find('input[name="id"]').val();
+  const name = $(this).find('input[name="name"]').val();
+  const groups = $(this).find('select[name="groups"]').val() || [];
+  const status = $(this).find('input[name="status"]').prop('checked');
+
+  if (!name) {
+    message.error('名称不能为空');
+    return;
+  }
+
+  if (groups.length === 0) {
+    message.error('请选择至少一个用户组');
+    return;
+  }
+
+  try {
+    if (id) {
+      // 更新
+      await request.patch(`/ovpn/firewall?a=update_whitelist`, {
+        id,
+        name,
+        groups: groups.join(','),
+        status: status.toString(),
+      });
+      message.success('更新成功');
+    } else {
+      // 添加
+      await request.post('/ovpn/firewall?a=add_whitelist', {
+        name,
+        groups: groups.join(','),
+      });
+      message.success('添加成功');
+    }
+
+    $('#addWhitelistModal').modal('hide');
+    loadClientIsolate();
+  } catch (e) {
+    message.error(id ? '更新失败' : '添加失败');
+  }
 });
 
 $('#manageCert').click(function () {
@@ -339,7 +512,12 @@ $(document).on('click', '#killClient', function () {
   });
 });
 
-$(document).on('click', '#rateLimit', function () {
+$(document).on('click', '#rateLimit', async function () {
+  const nftData = await request.get('/ovpn/firewall?a=check_nft');
+  if (!nftData.available) {
+    message.warning('nftables 未正常加载，限速功能不可用', 0);
+    return;
+  }
   const data = vtable.row($(this).parents('tr')).data();
   $('#rateLimitModal form').trigger('reset');
   request.get(`/ovpn/firewall?a=get_rateLimit&vip=${data.vip || data.vip6}`).then((res) => {

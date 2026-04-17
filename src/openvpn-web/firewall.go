@@ -29,6 +29,31 @@ type Firewall struct {
 	UpdatedAt time.Time `json:"updatedAt,omitempty" form:"updatedAt,omitempty"`
 }
 
+// ClientWhitelist 客户端互连白名单，用于控制哪些用户组之间可以互相访问
+type ClientWhitelist struct {
+	ID        uint      `gorm:"primarykey" json:"id" form:"id"`
+	Name      string    `gorm:"uniqueIndex;not null" json:"name" form:"name"`
+	Groups    []*Group  `gorm:"many2many:client_whitelist_groups;constraint:OnUpdate:CASCADE,OnDelete:CASCADE;" json:"groups"`
+	Status    *bool     `gorm:"default:true" json:"status" form:"status"`
+	CreatedAt time.Time `json:"createdAt,omitempty" form:"createdAt,omitempty"`
+	UpdatedAt time.Time `json:"updatedAt,omitempty" form:"updatedAt,omitempty"`
+}
+
+func (ClientWhitelist) TableName() string {
+	return "client_whitelist"
+}
+
+// ClientIsolate 客户端隔离开关设置
+type ClientIsolate struct {
+	ID        uint      `gorm:"primarykey" json:"id" form:"id"`
+	Isolate   bool      `gorm:"default:true" json:"isolate" form:"isolate"`
+	UpdatedAt time.Time `json:"updatedAt,omitempty" form:"updatedAt,omitempty"`
+}
+
+func (ClientIsolate) TableName() string {
+	return "client_isolate"
+}
+
 type ChainRuleData struct {
 	Rate   string `json:"rate"`
 	Unit   string `json:"unit"`
@@ -349,6 +374,10 @@ func getNftTableSet(name string) bool {
 	return exec.Command("nft", "list", "set", "inet", nftTableName, name).Run() == nil
 }
 
+func isNftAvailable() bool {
+	return exec.Command("nft", "list", "table", "inet", nftTableName).Run() == nil
+}
+
 func getNftTableSetElement(name, ip string) bool {
 	setName := name + "_v4"
 	if strings.Contains(ip, ":") {
@@ -534,6 +563,302 @@ func saveNftConfig() error {
 	return os.WriteFile(path.Join(ovData, "openvpn.nft"), out, 0644)
 }
 
+// setNftIsolateChain 设置客户端隔离规则
+// isolate: true = 开启隔离(默认拒绝), false = 关闭隔离(默认接受)
+func setNftIsolateChain(isolate bool) error {
+	var sb strings.Builder
+
+	// 获取隔离规则句柄
+	cmd := exec.Command("nft", "-a", "list", "chain", "inet", nftTableName, "forward")
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("获取隔离规则失败: %s", err.Error())
+	}
+
+	var isolateHandle string
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "comment \"client_isolate\"") {
+			parts := strings.Split(line, "handle")
+			if len(parts) >= 2 {
+				isolateHandle = strings.TrimSpace(parts[1])
+			}
+		}
+	}
+
+	if isolate {
+		// 开启隔离: 添加默认接受规则到白名单集合内的流量
+		if isolateHandle == "" {
+			fmt.Fprintf(&sb, "add rule inet %s forward ip saddr @isolate_clients_v4 ip daddr @isolate_clients_v4 accept comment \"client_isolate\"\n", nftTableName)
+			fmt.Fprintf(&sb, "add rule inet %s forward ip6 saddr @isolate_clients_v6 ip6 daddr @isolate_clients_v6 accept comment \"client_isolate\"\n", nftTableName)
+		}
+	} else {
+		// 关闭隔离: 删除默认接受规则
+		if isolateHandle != "" {
+			fmt.Fprintf(&sb, "delete rule inet %s forward handle %s\n", nftTableName, isolateHandle)
+			// 重新查找并删除剩余的规则
+			cmd := exec.Command("nft", "-a", "list", "chain", "inet", nftTableName, "forward")
+			out, err := cmd.Output()
+			if err == nil {
+				lines := strings.Split(string(out), "\n")
+				for _, line := range lines {
+					if strings.Contains(line, "comment \"client_isolate\"") {
+						parts := strings.Split(line, "handle")
+						if len(parts) >= 2 {
+							handle := strings.TrimSpace(parts[1])
+							fmt.Fprintf(&sb, "delete rule inet %s forward handle %s\n", nftTableName, handle)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if sb.Len() == 0 {
+		return nil
+	}
+
+	cmd = exec.Command("nft", "-f", "-")
+	cmd.Stdin = strings.NewReader(sb.String())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if len(out) == 0 {
+			out = []byte(err.Error())
+		}
+		return fmt.Errorf("%s", out)
+	}
+
+	return nil
+}
+
+// setClientWhitelistNft 设置客户端互连白名单的 nftables 规则
+func setClientWhitelistNft(w ClientWhitelist) error {
+	var sb strings.Builder
+
+	// 获取所有白名单规则的句柄
+	cmd := exec.Command("nft", "-a", "list", "chain", "inet", nftTableName, "forward")
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("获取白名单规则失败: %s", err.Error())
+	}
+
+	existingHandles := make(map[string]string)
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		if strings.Contains(line, fmt.Sprintf("comment \"whitelist_%d\"", w.ID)) {
+			parts := strings.Split(line, "handle")
+			if len(parts) >= 2 {
+				handle := strings.TrimSpace(parts[1])
+				if strings.Contains(line, "ip saddr") {
+					existingHandles["v4"] = handle
+				} else if strings.Contains(line, "ip6 saddr") {
+					existingHandles["v6"] = handle
+				}
+			}
+		}
+	}
+
+	whitelistSetV4 := fmt.Sprintf("wl%d_src_v4", w.ID)
+	whitelistSetV6 := fmt.Sprintf("wl%d_src_v6", w.ID)
+
+	// 创建/更新集合
+	fmt.Fprintf(&sb, "add set inet %s %s { type ipv4_addr; flags interval; }\n", nftTableName, whitelistSetV4)
+	fmt.Fprintf(&sb, "add set inet %s %s { type ipv6_addr; flags interval; }\n", nftTableName, whitelistSetV6)
+
+	// 如果规则已存在则替换，否则添加
+	for suffix, family := range map[string]string{"v4": "ip", "v6": "ip6"} {
+		setName := map[string]string{"v4": whitelistSetV4, "v6": whitelistSetV6}[suffix]
+		handle, exists := existingHandles[suffix]
+		if exists {
+			fmt.Fprintf(&sb, "replace rule inet %s forward handle %s %s saddr @%s %s daddr @%s accept comment \"whitelist_%d\"\n",
+				nftTableName, handle, family, setName, family, setName, w.ID)
+		} else {
+			fmt.Fprintf(&sb, "add rule inet %s forward %s saddr @%s %s daddr @%s accept comment \"whitelist_%d\"\n",
+				nftTableName, family, setName, family, setName, w.ID)
+		}
+	}
+
+	cmd = exec.Command("nft", "-f", "-")
+	cmd.Stdin = strings.NewReader(sb.String())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if len(out) == 0 {
+			out = []byte(err.Error())
+		}
+		return fmt.Errorf("%s", out)
+	}
+
+	return nil
+}
+
+// deleteClientWhitelistNft 删除客户端互连白名单的 nftables 规则
+func deleteClientWhitelistNft(id string) error {
+	var sb strings.Builder
+
+	cmd := exec.Command("nft", "-a", "list", "chain", "inet", nftTableName, "forward")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		if strings.Contains(line, fmt.Sprintf("comment \"whitelist_%s\"", id)) {
+			parts := strings.Split(line, "handle")
+			if len(parts) >= 2 {
+				handle := strings.TrimSpace(parts[1])
+				fmt.Fprintf(&sb, "delete rule inet %s forward handle %s\n", nftTableName, handle)
+			}
+		}
+	}
+
+	for _, suffix := range []string{"v4", "v6"} {
+		setName := fmt.Sprintf("wl%s_src_%s", id, suffix)
+		if getNftTableSet(setName) {
+			fmt.Fprintf(&sb, "delete set inet %s %s\n", nftTableName, setName)
+		}
+	}
+
+	if sb.Len() == 0 {
+		return nil
+	}
+
+	cmd = exec.Command("nft", "-f", "-")
+	cmd.Stdin = strings.NewReader(sb.String())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if len(out) == 0 {
+			out = []byte(err.Error())
+		}
+		return fmt.Errorf("%s", out)
+	}
+
+	return nil
+}
+
+// addWhitelistGroupIps 添加白名单组内所有用户的 IP 到集合
+func addWhitelistGroupIps(w ClientWhitelist) error {
+	if len(w.Groups) == 0 {
+		return nil
+	}
+
+	groupIDs := make([]string, len(w.Groups))
+	for i, g := range w.Groups {
+		groupIDs[i] = strconv.Itoa(int(g.ID))
+	}
+
+	var ips []struct {
+		Vip  string
+		Vip6 string
+	}
+
+	db.Raw(`
+		WITH RECURSIVE group_tree AS (
+			SELECT id FROM "group" WHERE id IN (`+strings.Join(groupIDs, ",")+`)
+			UNION ALL
+			SELECT g.id FROM "group" g
+			INNER JOIN group_tree gt ON g.parent_id = gt.id
+		)
+		SELECT DISTINCT v.vip, v.vip6 FROM vpn v
+		JOIN "user" u ON u.username = v.username
+		WHERE u.gid IN (SELECT id FROM group_tree)
+		AND v.username != 'UNDEF'
+	`, groupIDs).Scan(&ips)
+
+	setName := fmt.Sprintf("wl%d_src", w.ID)
+
+	for _, ip := range ips {
+		if ip.Vip != "" {
+			if err := addNftTableSetElement(setName, ip.Vip); err != nil {
+				logger.Error(context.Background(), err.Error())
+			}
+		}
+		if ip.Vip6 != "" {
+			if err := addNftTableSetElement(setName, ip.Vip6); err != nil {
+				logger.Error(context.Background(), err.Error())
+			}
+		}
+	}
+
+	return nil
+}
+
+// ClientWhitelist CRUD 操作
+func (w *ClientWhitelist) Create() error {
+	result := db.Omit("Groups.*").Create(&w)
+	if result.Error != nil {
+		return result.Error
+	}
+
+	if err := setClientWhitelistNft(*w); err != nil {
+		return err
+	}
+
+	if err := addWhitelistGroupIps(*w); err != nil {
+		return err
+	}
+
+	return saveNftConfig()
+}
+
+func (w *ClientWhitelist) Update() error {
+	result := db.Model(&w).Omit("Groups.*").Updates(&w)
+	if result.Error != nil {
+		return result.Error
+	}
+
+	if err := setClientWhitelistNft(*w); err != nil {
+		return err
+	}
+
+	return saveNftConfig()
+}
+
+func (w *ClientWhitelist) Delete(id string) error {
+	if err := deleteClientWhitelistNft(id); err != nil {
+		logger.Error(context.Background(), err.Error())
+	}
+
+	result := db.Delete(&w, id)
+	return result.Error
+}
+
+func (w *ClientWhitelist) Get(id string) error {
+	result := db.Preload("Groups").First(&w, id)
+	return result.Error
+}
+
+func (w *ClientWhitelist) All() []ClientWhitelist {
+	var whitelists []ClientWhitelist
+	result := db.Model(&ClientWhitelist{}).Preload("Groups").Find(&whitelists)
+	if result.Error != nil {
+		logger.Error(context.Background(), result.Error.Error())
+		return []ClientWhitelist{}
+	}
+	return whitelists
+}
+
+// ClientIsolate CRUD 操作
+func (ci *ClientIsolate) Get() error {
+	result := db.First(&ci)
+	if result.Error == gorm.ErrRecordNotFound {
+		ci.Isolate = true
+		db.Create(&ci)
+		return nil
+	}
+	return result.Error
+}
+
+func (ci *ClientIsolate) Update() error {
+	result := db.Model(&ci).Updates(&ci)
+	if result.Error != nil {
+		return result.Error
+	}
+
+	if err := setNftIsolateChain(ci.Isolate); err != nil {
+		return err
+	}
+
+	return saveNftConfig()
+}
+
 func getUserFirewallSetName(username string) []FirewallSet {
 	var fs []FirewallSet
 
@@ -613,6 +938,15 @@ func FirewallHandler(c *gin.Context) {
 			downQos := getNftQosChainRule("download", vip)
 
 			c.JSON(http.StatusOK, gin.H{"upQos": upQos, "downQos": downQos})
+		case "get_whitelist":
+			var w ClientWhitelist
+			c.JSON(http.StatusOK, w.All())
+		case "get_isolate":
+			var ci ClientIsolate
+			ci.Get()
+			c.JSON(http.StatusOK, ci)
+		case "check_nft":
+			c.JSON(http.StatusOK, gin.H{"available": isNftAvailable()})
 		default:
 			var f Firewall
 			c.JSON(http.StatusOK, f.All())
@@ -708,6 +1042,50 @@ func FirewallHandler(c *gin.Context) {
 			}
 
 			c.JSON(http.StatusOK, gin.H{"message": "移除防火墙策略成功"})
+		case "set_isolate":
+			isolate := c.PostForm("isolate") == "true"
+			ci := ClientIsolate{Isolate: isolate}
+			if err := ci.Get(); err != nil {
+				logger.Error(context.Background(), err.Error())
+				c.JSON(http.StatusInternalServerError, gin.H{"message": "获取隔离设置失败"})
+				return
+			}
+			ci.Isolate = isolate
+			if err := ci.Update(); err != nil {
+				logger.Error(context.Background(), err.Error())
+				c.JSON(http.StatusInternalServerError, gin.H{"message": "设置隔离失败"})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"message": "设置成功"})
+		case "add_whitelist":
+			name := c.PostForm("name")
+			if name == "" {
+				c.JSON(http.StatusBadRequest, gin.H{"message": "名称不能为空"})
+				return
+			}
+
+			groups := c.PostForm("groups")
+			var groupList []*Group
+			if groups != "" {
+				for _, g := range strings.Split(groups, ",") {
+					id, _ := strconv.Atoi(g)
+					groupList = append(groupList, &Group{ID: uint(id)})
+				}
+			}
+
+			if len(groupList) == 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"message": "请选择至少一个用户组"})
+				return
+			}
+
+			w := ClientWhitelist{Name: name, Groups: groupList}
+			if err := w.Create(); err != nil {
+				logger.Error(context.Background(), err.Error())
+				c.JSON(http.StatusInternalServerError, gin.H{"message": "添加白名单失败"})
+				return
+			}
+
+			c.JSON(http.StatusOK, gin.H{"message": "添加成功"})
 		default:
 			var f Firewall
 			c.ShouldBind(&f)
@@ -758,82 +1136,141 @@ func FirewallHandler(c *gin.Context) {
 			}
 		}
 	case http.MethodPatch:
-		var f Firewall
-		c.ShouldBind(&f)
-
-		err := db.Transaction(func(tx *gorm.DB) error {
-			if sg, ok := c.Request.PostForm["sg"]; ok {
-				if sg[0] != "" {
-					for _, g := range strings.Split(sg[0], ",") {
-						id, _ := strconv.Atoi(g)
-						f.SGroup = append(f.SGroup, &Group{ID: uint(id)})
-					}
-				}
-
-				if err := tx.Model(&f).Omit("SGroup.*", "DGroup.*").Association("SGroup").Replace(f.SGroup); err != nil {
-					return err
-				}
+		a := c.Query("a")
+		switch a {
+		case "update_whitelist":
+			id := c.PostForm("id")
+			if id == "" {
+				c.JSON(http.StatusBadRequest, gin.H{"message": "ID不能为空"})
+				return
 			}
 
-			if dg, ok := c.Request.PostForm["dg"]; ok {
-				if dg[0] != "" {
-					for _, g := range strings.Split(dg[0], ",") {
-						id, _ := strconv.Atoi(g)
-						f.DGroup = append(f.DGroup, &Group{ID: uint(id)})
-					}
-				}
-
-				if err := tx.Model(&f).Omit("SGroup.*", "DGroup.*").Association("DGroup").Replace(f.DGroup); err != nil {
-					return err
-				}
-			}
-
-			if err := setNftChain("forward", f); err != nil {
+			w := ClientWhitelist{}
+			if err := w.Get(id); err != nil {
 				logger.Error(context.Background(), err.Error())
-				return fmt.Errorf("更新防火墙失败")
+				c.JSON(http.StatusInternalServerError, gin.H{"message": "获取白名单失败"})
+				return
 			}
 
-			if err := setOnlineClinetNft(f); err != nil {
-				logger.Error(context.Background(), err.Error())
-				return fmt.Errorf("更新在线客户端防火墙规则失败")
+			if name := c.PostForm("name"); name != "" {
+				w.Name = name
 			}
 
-			if err := saveNftConfig(); err != nil {
-				logger.Error(context.Background(), err.Error())
-				return fmt.Errorf("保存防火墙配置失败")
-			}
-
-			if err := tx.Omit("SGroup.*", "DGroup.*").Updates(&f).Error; err != nil {
-				return err
-			}
-
-			if sip, ok := c.Request.PostForm["sip"]; ok {
-				if sip[0] == "" {
-					if err := tx.Model(&f).Omit("SGroup.*", "DGroup.*").Update("sip", "").Error; err != nil {
-						return err
-					}
+			groups := c.PostForm("groups")
+			if groups != "" {
+				var groupList []*Group
+				for _, g := range strings.Split(groups, ",") {
+					gid, _ := strconv.Atoi(g)
+					groupList = append(groupList, &Group{ID: uint(gid)})
+				}
+				if err := db.Model(&w).Association("Groups").Replace(groupList); err != nil {
+					logger.Error(context.Background(), err.Error())
+					c.JSON(http.StatusInternalServerError, gin.H{"message": "更新用户组失败"})
+					return
 				}
 			}
 
-			if dip, ok := c.Request.PostForm["dip"]; ok {
-				if dip[0] == "" {
-					if err := tx.Model(&f).Omit("SGroup.*", "DGroup.*").Update("dip", "").Error; err != nil {
-						return err
-					}
-				}
+			if status := c.PostForm("status"); status != "" {
+				w.Status = new(bool)
+				*w.Status = status == "true"
 			}
 
-			return nil
-		})
+			if err := w.Update(); err != nil {
+				logger.Error(context.Background(), err.Error())
+				c.JSON(http.StatusInternalServerError, gin.H{"message": "更新白名单失败"})
+				return
+			}
 
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"message": err.Error()})
-		} else {
 			c.JSON(http.StatusOK, gin.H{"message": "更新成功"})
+		default:
+			var f Firewall
+			c.ShouldBind(&f)
+
+			err := db.Transaction(func(tx *gorm.DB) error {
+				if sg, ok := c.Request.PostForm["sg"]; ok {
+					if sg[0] != "" {
+						for _, g := range strings.Split(sg[0], ",") {
+							id, _ := strconv.Atoi(g)
+							f.SGroup = append(f.SGroup, &Group{ID: uint(id)})
+						}
+					}
+
+					if err := tx.Model(&f).Omit("SGroup.*", "DGroup.*").Association("SGroup").Replace(f.SGroup); err != nil {
+						return err
+					}
+				}
+
+				if dg, ok := c.Request.PostForm["dg"]; ok {
+					if dg[0] != "" {
+						for _, g := range strings.Split(dg[0], ",") {
+							id, _ := strconv.Atoi(g)
+							f.DGroup = append(f.DGroup, &Group{ID: uint(id)})
+						}
+					}
+
+					if err := tx.Model(&f).Omit("SGroup.*", "DGroup.*").Association("DGroup").Replace(f.DGroup); err != nil {
+						return err
+					}
+				}
+
+				if err := setNftChain("forward", f); err != nil {
+					logger.Error(context.Background(), err.Error())
+					return fmt.Errorf("更新防火墙失败")
+				}
+
+				if err := setOnlineClinetNft(f); err != nil {
+					logger.Error(context.Background(), err.Error())
+					return fmt.Errorf("更新在线客户端防火墙规则失败")
+				}
+
+				if err := saveNftConfig(); err != nil {
+					logger.Error(context.Background(), err.Error())
+					return fmt.Errorf("保存防火墙配置失败")
+				}
+
+				if err := tx.Omit("SGroup.*", "DGroup.*").Updates(&f).Error; err != nil {
+					return err
+				}
+
+				if sip, ok := c.Request.PostForm["sip"]; ok {
+					if sip[0] == "" {
+						if err := tx.Model(&f).Omit("SGroup.*", "DGroup.*").Update("sip", "").Error; err != nil {
+							return err
+						}
+					}
+				}
+
+				if dip, ok := c.Request.PostForm["dip"]; ok {
+					if dip[0] == "" {
+						if err := tx.Model(&f).Omit("SGroup.*", "DGroup.*").Update("dip", "").Error; err != nil {
+							return err
+						}
+					}
+				}
+
+				return nil
+			})
+
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"message": err.Error()})
+			} else {
+				c.JSON(http.StatusOK, gin.H{"message": "更新成功"})
+			}
 		}
 	case http.MethodDelete:
+		id := c.Query("whitelist_id")
+		if id != "" {
+			w := ClientWhitelist{}
+			if err := w.Delete(id); err != nil {
+				logger.Error(context.Background(), err.Error())
+				c.JSON(http.StatusInternalServerError, gin.H{"message": "删除白名单失败"})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"message": "删除成功"})
+			return
+		}
 		var f Firewall
-		id := c.Param("id")
+		id = c.Param("id")
 
 		err := db.Transaction(func(tx *gorm.DB) error {
 			if err := deleteNftChainRule("forward", id); err != nil {

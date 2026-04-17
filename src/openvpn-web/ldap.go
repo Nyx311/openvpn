@@ -95,7 +95,7 @@ func (l *LdapConn) Auth(clogin bool, username, password, commonName string) erro
 
 		ipaddr := sr.Entries[0].GetAttributeValue(ldapUserAttrIpaddrName)
 		if ipaddr != "" {
-			os.WriteFile(path.Join(ovData, ".ovip"), []byte(ipaddr), 0644)
+			os.WriteFile(path.Join(ovData, ".ovip_"+username), []byte(ipaddr), 0644)
 		}
 	}
 
