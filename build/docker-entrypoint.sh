@@ -216,29 +216,50 @@ add_history() {
 	set -e
 }
 
-set_ovip() {
+set_connect_config() {
 	cc_file="$1"
-	ip_file="$ovpn_data/.ovip"
 
-	if [ -f "$ip_file" ]; then
-		ipaddr=$(cat $ip_file)
-		if [ -n "$ipaddr" ]; then
-			echo "ifconfig-push $ipaddr $ifconfig_netmask" >$cc_file
-			rm -rf $ip_file
-		fi
+	set +e
+	WEB_PORT=$(jq -r '.system.base.web_port // "8833"' $ovpn_data/config.json)
+	TOKEN=$(jq -r '.system.base.token // ""' $ovpn_data/config.json)
+	ovpn_connect_config_api="http://127.0.0.1:$WEB_PORT/ovpn/connect-config"
+
+	resp=$(curl -w "\n%{http_code}" --connect-timeout 5 -s -X POST "$ovpn_connect_config_api" \
+		--data-urlencode "username=$username" \
+		--data-urlencode "common_name=$common_name" \
+		-H "O-Token: $TOKEN")
+	curl_status=$?
+	if [[ $curl_status -ne 0 ]]; then
+		echo "[CLIENT-CONNECT] $0:$LINENO get connect config failed username=$username common_name=$common_name"
+		set -e
+		return
 	fi
-}
 
-set_ovconfig() {
-	cc_file="$1"
-	ovc_file="$ovpn_data/.ovc"
+	body=$(echo "$resp" | head -n -1)
+	http_code=$(echo "$resp" | tail -n 1)
+	if [[ "$http_code" -ne 200 ]]; then
+		echo "[CLIENT-CONNECT] $0:$LINENO get connect config failed username=$username common_name=$common_name body=$body"
+		set -e
+		return
+	fi
 
-	if [ -f "$ovc_file" ]; then
-		ovconfig=$(cat $ovc_file)
-		if [ -n "$ovconfig" ]; then
-			echo "$ovconfig" >>$cc_file
-			rm -rf $ovc_file
-		fi
+	ipaddr=$(echo "$body" | jq -r '.ip_addr // empty')
+	ovconfig=$(echo "$body" | jq -r '.config // empty')
+	jq_status=$?
+	if [[ $jq_status -ne 0 ]]; then
+		echo "[CLIENT-CONNECT] $0:$LINENO parse connect config failed username=$username common_name=$common_name body=$body"
+		set -e
+		return
+	fi
+
+	set -e
+	echo "[CLIENT-CONNECT] apply connect config username=$username common_name=$common_name ip=$ipaddr"
+	if [ -n "$ipaddr" ]; then
+		echo "ifconfig-push $ipaddr $ifconfig_netmask" >$cc_file
+	fi
+
+	if [ -n "$ovconfig" ]; then
+		echo "$ovconfig" >>$cc_file
 	fi
 }
 
@@ -307,8 +328,7 @@ client_disconnect() {
 }
 
 client_connect() {
-	set_ovip "$1"
-	set_ovconfig "$1"
+	set_connect_config "$1"
 }
 
 ################################################################################################

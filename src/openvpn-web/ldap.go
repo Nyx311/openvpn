@@ -4,8 +4,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
-	"os"
-	"path"
 	"strings"
 	"time"
 
@@ -93,10 +91,6 @@ func (l *LdapConn) Auth(clogin bool, username, password, commonName string) erro
 			}
 		}
 
-		ipaddr := sr.Entries[0].GetAttributeValue(ldapUserAttrIpaddrName)
-		if ipaddr != "" {
-			os.WriteFile(path.Join(ovData, ".ovip"), []byte(ipaddr), 0644)
-		}
 	}
 
 	return nil

@@ -499,7 +499,8 @@ func AuthMiddleWare() gin.HandlerFunc {
 		user := session.Get("user")
 
 		if c.GetHeader("O-Token") == viper.GetString("system.base.token") {
-			if c.Request.URL.Path == "/ovpn/login" || c.Request.URL.Path == "/ovpn/history" || c.Request.URL.Path == "/ovpn/firewall" {
+			switch c.Request.URL.Path {
+			case "/ovpn/login", "/ovpn/connect-config", "/ovpn/history", "/ovpn/firewall":
 				if IsLocalRequest(c) {
 					c.Next()
 					return
@@ -947,6 +948,19 @@ func main() {
 			} else {
 				c.JSON(http.StatusOK, gin.H{"message": "登录成功"})
 			}
+		})
+
+		ovpn.POST("/connect-config", func(c *gin.Context) {
+			u := User{Username: c.PostForm("username")}
+
+			config, err := u.ConnectConfig(c.PostForm("common_name"))
+			if err != nil {
+				logger.Error(context.Background(), err.Error())
+				c.JSON(http.StatusInternalServerError, gin.H{"message": err.Error()})
+				return
+			}
+
+			c.JSON(http.StatusOK, config)
 		})
 
 		ovpn.GET("/online-client", func(c *gin.Context) {

@@ -35,6 +35,11 @@ type User struct {
 	UpdatedAt    time.Time  `json:"updatedAt,omitempty" form:"updatedAt,omitempty"`
 }
 
+type UserConnectConfig struct {
+	IpAddr string `json:"ip_addr"`
+	Config string `json:"config"`
+}
+
 func (u *User) BeforeSave(tx *gorm.DB) (err error) {
 	if u.Password != "" {
 		ep, _ := aes.AesEncrypt(u.Password, secretKey)
@@ -201,45 +206,9 @@ func (u *User) Login(clogin bool) error {
 			return fmt.Errorf("密码错误")
 		}
 
-		if clogin {
-			if viper.GetBool("system.base.validate_client_config") {
-				if commonName != strings.TrimSuffix(u.OvpnConfig, ".ovpn") {
-					return fmt.Errorf("使用非法配置文件登录")
-				}
-			}
-
-			if u.IpAddr != "" {
-				os.WriteFile(path.Join(ovData, ".ovip"), []byte(u.IpAddr), 0644)
-			}
-
-			var ovconfig sql.NullString
-			db.Raw(`
-				WITH RECURSIVE group_up AS (
-					SELECT
-						id,
-						parent_id,
-						config,
-						0 AS level
-					FROM "group"
-					WHERE id = ?
-			
-					UNION ALL
-			
-					SELECT
-						g.id,
-						g.parent_id,
-						g.config,
-						gu.level + 1
-					FROM "group" g
-					JOIN group_up gu ON g.id = gu.parent_id
-				)
-				SELECT GROUP_CONCAT(REPLACE(config, '\n', CHAR(10)), CHAR(10)) AS configs
-				FROM group_up
-				WHERE config IS NOT NULL
-			`, u.Gid).Scan(&ovconfig)
-
-			if ovconfig.Valid {
-				os.WriteFile(path.Join(ovData, ".ovc"), []byte(ovconfig.String), 0644)
+		if clogin && viper.GetBool("system.base.validate_client_config") {
+			if commonName != strings.TrimSuffix(u.OvpnConfig, ".ovpn") {
+				return fmt.Errorf("使用非法配置文件登录")
 			}
 		}
 
@@ -247,6 +216,114 @@ func (u *User) Login(clogin bool) error {
 
 		return nil
 	}
+}
+
+func (u *User) getConnectUser(commonName string) (User, error) {
+	var user User
+	username := strings.TrimSpace(u.Username)
+	commonName = strings.TrimSpace(commonName)
+
+	if username != "" && username != "UNDEF" {
+		err := db.Select("username", "ip_addr", "ovpn_config", "gid").First(&user, "username = ?", username).Error
+		if err == nil {
+			return user, nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return user, err
+		}
+	}
+
+	if commonName == "" {
+		return user, gorm.ErrRecordNotFound
+	}
+
+	var users []User
+	if err := db.Select("username", "ip_addr", "ovpn_config", "gid").
+		Where("username = ? OR ovpn_config = ? OR ovpn_config = ?", commonName, commonName, commonName+".ovpn").
+		Find(&users).Error; err != nil {
+		return user, err
+	}
+
+	if len(users) == 0 {
+		return user, gorm.ErrRecordNotFound
+	}
+	if len(users) > 1 {
+		return user, fmt.Errorf("ambiguous common_name: %s", commonName)
+	}
+
+	return users[0], nil
+}
+
+func (u *User) ConnectConfig(commonName string) (UserConnectConfig, error) {
+	var config UserConnectConfig
+
+	if ldapAuth {
+		lookupName := strings.TrimSpace(u.Username)
+		if lookupName == "" || lookupName == "UNDEF" {
+			lookupName = strings.TrimSpace(commonName)
+		}
+		if lookupName == "" {
+			return config, nil
+		}
+
+		l, err := InitLdap()
+		if err != nil {
+			return config, err
+		}
+		defer l.Conn.Close()
+
+		lu, err := l.Get(lookupName)
+		if err != nil {
+			return config, err
+		}
+
+		config.IpAddr = lu.Ipaddr
+		return config, nil
+	}
+
+	user, err := u.getConnectUser(commonName)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return config, nil
+	}
+	if err != nil {
+		return config, err
+	}
+
+	config.IpAddr = user.IpAddr
+
+	var ovconfig sql.NullString
+	if err := db.Raw(`
+		WITH RECURSIVE group_up AS (
+			SELECT
+				id,
+				parent_id,
+				config,
+				0 AS level
+			FROM "group"
+			WHERE id = ?
+
+			UNION ALL
+
+			SELECT
+				g.id,
+				g.parent_id,
+				g.config,
+				gu.level + 1
+			FROM "group" g
+			JOIN group_up gu ON g.id = gu.parent_id
+		)
+		SELECT GROUP_CONCAT(REPLACE(config, '\n', CHAR(10)), CHAR(10)) AS configs
+		FROM group_up
+		WHERE config IS NOT NULL
+	`, user.Gid).Scan(&ovconfig).Error; err != nil {
+		return config, err
+	}
+
+	if ovconfig.Valid {
+		config.Config = ovconfig.String
+	}
+
+	return config, nil
 }
 
 func (u User) Info() User {
