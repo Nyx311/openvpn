@@ -44,6 +44,8 @@ type ClientData struct {
 	Rip            string  `json:"rip"`
 	Vip            string  `json:"vip"`
 	Vip6           string  `json:"vip6"`
+	AccountName    string  `json:"accountName"`
+	AssignedVip    string  `json:"assignedVip"`
 	RecvBytes      float64 `json:"recvBytes"`
 	SendBytes      float64 `json:"sendBytes"`
 	ConnDate       string  `json:"connDate"`
@@ -154,6 +156,9 @@ func (ov *ovpn) sendCommand(command string) (string, error) {
 
 func (ov *ovpn) getClient() []ClientData {
 	clients := make([]ClientData, 0)
+	normalize := func(s string) string {
+		return strings.ToLower(strings.TrimSpace(s))
+	}
 
 	data, err := ov.sendCommand("status 3")
 	if err != nil {
@@ -188,6 +193,57 @@ func (ov *ovpn) getClient() []ClientData {
 			}
 
 			clients = append(clients, cd)
+		}
+	}
+
+	var users []User
+	result := db.Select("username", "name", "ip_addr", "ovpn_config").Model(&User{}).Find(&users)
+	if result.Error != nil {
+		logger.Error(context.Background(), result.Error.Error())
+		return clients
+	}
+
+	userMap := make(map[string]User, len(users))
+	configMap := make(map[string]User, len(users))
+	ipMap := make(map[string]User, len(users))
+	for _, u := range users {
+		if un := normalize(u.Username); un != "" {
+			userMap[un] = u
+		}
+		if u.OvpnConfig != "" {
+			cfg := normalize(u.OvpnConfig)
+			configMap[cfg] = u
+			configMap[strings.TrimSuffix(cfg, ".ovpn")] = u
+		}
+		if ip := normalize(u.IpAddr); ip != "" {
+			ipMap[ip] = u
+		}
+	}
+
+	for i := range clients {
+		var (
+			u  User
+			ok bool
+		)
+
+		if clients[i].Username != "" && clients[i].Username != "UNDEF" {
+			u, ok = userMap[normalize(clients[i].Username)]
+		}
+		if !ok {
+			u, ok = configMap[normalize(clients[i].CommonName)]
+		}
+		if !ok {
+			u, ok = userMap[normalize(clients[i].CommonName)]
+		}
+		if !ok {
+			u, ok = ipMap[normalize(clients[i].Vip)]
+		}
+		if !ok {
+			u, ok = ipMap[normalize(clients[i].Vip6)]
+		}
+		if ok {
+			clients[i].AccountName = u.Name
+			clients[i].AssignedVip = u.IpAddr
 		}
 	}
 

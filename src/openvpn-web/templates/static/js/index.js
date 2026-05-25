@@ -24,9 +24,32 @@ function formatSize(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
+const createColumnVisibilityButton = (columns) => ({
+  extend: 'collection',
+  text: '列操作',
+  className: 'btn-outline-secondary',
+  buttons: columns.map(({ name, text }) => ({
+    text,
+    init: function (dt) {
+      this.active(dt.column(`${name}:name`).visible());
+    },
+    action: function (e, dt) {
+      const column = dt.column(`${name}:name`);
+      const visible = !column.visible();
+
+      column.visible(visible);
+      this.active(visible);
+      dt.columns.adjust();
+      if (dt.responsive) {
+        dt.responsive.recalc();
+      }
+    },
+  })),
+});
+
 tables.status = {
   rowId: 'id',
-  order: [[5, 'desc']],
+  order: [[7, 'desc']],
   columns: [
     {
       title: '用户名/客户端',
@@ -37,6 +60,24 @@ tables.status = {
         `<button class="btn btn-link text-decoration-none p-0" id="showOnlineClientOffcanvas">
       ${data == 'UNDEF' ? row.commonName : data}
         </button>`,
+    },
+    {
+      title: '账号姓名',
+      data: 'accountName',
+      name: 'accountName',
+      visible: false,
+      defaultContent: '',
+      className: 'dt-center w-min-120',
+      render: (data) => data || '',
+    },
+    {
+      title: '分配 VPN IP',
+      data: 'assignedVip',
+      name: 'assignedVip',
+      visible: false,
+      defaultContent: '',
+      className: 'dt-center w-max-250 text-truncate',
+      render: (data) => data || '',
     },
     {
       title: 'VPN IP',
@@ -104,9 +145,20 @@ tables.status = {
     },
   ],
   dom:
-    "<'d-md-flex justify-content-between'f<'toolbar'>>" +
+    "<'row align-items-center'<'col d-flex'f><'col d-flex justify-content-center toolbar'><'col d-flex justify-content-end'B>>" +
     "<'row'<'col-sm-12'tr>>" +
     "<'d-md-flex justify-content-between align-items-center'lip>",
+  buttons: {
+    dom: {
+      button: { className: 'btn btn-sm' },
+    },
+    buttons: [
+      createColumnVisibilityButton([
+        { name: 'accountName', text: '账号姓名' },
+        { name: 'assignedVip', text: '分配 VPN IP' },
+      ]),
+    ],
+  },
   fnInitComplete: function () {
     const interval = setInterval(() => {
       if ($('#serverTable').is(':hidden')) {
@@ -418,11 +470,12 @@ $(document).on('click', '#enableNetworkSubmit', function () {
 });
 
 // 显示在线客户端详情
-$(document).on('click', '#showOnlineClientOffcanvas', async function () {
+$(document).on('click', '#showOnlineClientOffcanvas', function () {
   const data = vtable.row($(this).parents('tr')).data();
   const oc = new bootstrap.Offcanvas($('#onlineClientOffcanvas'));
 
-  const user = await request.get(`/ovpn/user?username=${data.username}`);
+  const accountName = data.accountName || '';
+  const assignedVip = data.assignedVip || '';
 
   const html = `
     <div class="desc-item row">
@@ -435,7 +488,11 @@ $(document).on('click', '#showOnlineClientOffcanvas', async function () {
     </div>
     <div class="desc-item row">
       <div class="col-5 desc-label">姓名</div>
-      <div class="col-7 desc-value">${user.name}</div>
+      <div class="col-7 desc-value">${accountName}</div>
+    </div>
+    <div class="desc-item row">
+      <div class="col-5 desc-label">分配 VPN IP</div>
+      <div class="col-7 desc-value">${assignedVip}</div>
     </div>
     <div class="desc-item row">
       <div class="col-5 desc-label">用户 IP</div>

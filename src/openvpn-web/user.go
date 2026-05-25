@@ -45,12 +45,19 @@ func (u *User) BeforeSave(tx *gorm.DB) (err error) {
 }
 
 func (u *User) AfterFind(tx *gorm.DB) (err error) {
-	dp, err := aes.AesDecrypt(u.Password, secretKey)
-	if err == nil {
-		u.Password = dp
+	// Some read paths only select partial columns and do not include password.
+	// In that case, skip decrypt and avoid failing the whole query.
+	if strings.TrimSpace(u.Password) == "" {
+		return nil
 	}
 
-	return
+	dp, derr := aes.AesDecrypt(u.Password, secretKey)
+	if derr != nil {
+		return nil
+	}
+
+	u.Password = dp
+	return nil
 }
 
 func (u *User) All() []User {
