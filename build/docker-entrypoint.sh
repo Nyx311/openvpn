@@ -11,9 +11,9 @@ init_pki() {
 
 	cat <<EOF >$EASYRSA_PKI/vars
 set_var EASYRSA /usr/share/easy-rsa
-set_var EASYRSA_CA_EXPIRE 365
-set_var EASYRSA_CERT_EXPIRE 365
-set_var EASYRSA_CRL_DAYS 365
+set_var EASYRSA_CA_EXPIRE 36500
+set_var EASYRSA_CERT_EXPIRE 36500
+set_var EASYRSA_CRL_DAYS 36500
 set_var EASYRSA_ALGO ec
 set_var EASYRSA_CURVE prime256v1
 EOF
