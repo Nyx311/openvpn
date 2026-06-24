@@ -1447,6 +1447,7 @@ func main() {
 			config := c.PostForm("config")
 			ccdConfig := c.PostForm("ccdConfig")
 			mfa := c.PostForm("mfa")
+			day := c.PostForm("day")
 
 			clientsDir := filepath.Join(ovData, "clients")
 			clientsRoot, err := os.OpenRoot(clientsDir)
@@ -1460,7 +1461,7 @@ func main() {
 			_, err = clientsRoot.Stat(name + ".ovpn")
 			if err != nil {
 				if os.IsNotExist(err) {
-					cmd := exec.Command("docker-entrypoint.sh", "genclient", name, serverAddr, serverPort, config, ccdConfig, mfa)
+					cmd := exec.Command("docker-entrypoint.sh", "genclient", name, serverAddr, serverPort, config, ccdConfig, mfa, day)
 					if out, err := cmd.CombinedOutput(); err != nil {
 						if len(out) == 0 {
 							out = []byte(err.Error())

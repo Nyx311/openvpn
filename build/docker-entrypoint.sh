@@ -153,7 +153,7 @@ genclient() {
 	OVPN_IPV6=$(jq -r '.openvpn.ovpn_ipv6 // "false"' $SYSTEM_CONFIG)
 
 	if [ ! -f "$EASYRSA_PKI/private/$1.key" ]; then
-		/usr/share/easy-rsa/easyrsa --batch build-client-full $1 nopass >/dev/null
+		/usr/share/easy-rsa/easyrsa --batch --days=${6:-36500} build-client-full $1 nopass >/dev/null
 	fi
 	mkdir -p $OVPN_DATA/clients
 	cat <<EOF >$OVPN_DATA/clients/$1.ovpn
@@ -348,7 +348,7 @@ case $1 in
 		echo -e "$6" >$OVPN_DATA/ccd/$2
 	fi
 
-	genclient "$2" "$3" "$4" "$5" "$7"
+	genclient "$2" "$3" "$4" "$5" "$7" "$8"
 	exit 0
 	;;
 "auth")

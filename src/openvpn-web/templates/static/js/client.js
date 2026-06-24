@@ -77,8 +77,9 @@ $('#addClientModal form').submit(function () {
   const config = $('#addClientModal textarea[name="config"]').val();
   const ccdConfig = $('#addClientModal textarea[name="ccdConfig"]').val();
   const mfa = $('#addClientModal input[name="mfa"]').is(':checked');
+  const day = $('#addClientModal input[name="day"]').val();
 
-  request.post('/ovpn/client', { name, serverAddr, serverPort, config, ccdConfig, mfa }).then((data) => {
+  request.post('/ovpn/client', { name, serverAddr, serverPort, config, ccdConfig, mfa, day }).then((data) => {
     vtable.ajax.reload(null, false);
     $('#addClientModal').modal('hide');
     $('#addClientModal form').trigger('reset');

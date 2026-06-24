@@ -874,6 +874,19 @@
                 </div>
               </div>
               <div class="row">
+                <label class="col-sm-3 col-form-label">证书有效期</label>
+                <div class="col-sm-9">
+                  <input
+                    type="number"
+                    class="form-control form-control-sm"
+                    name="day"
+                    value="36500"
+                    placeholder="天数"
+                    oninput="this.value = this.value.replace(/[^0-9]/g, '')"
+                  />
+                </div>
+              </div>
+              <div class="row">
                 <span class="col-sm-3"></span>
                 <div class="col-sm-9">
                   <input class="form-check-input" type="checkbox" id="mfa" name="mfa" />
