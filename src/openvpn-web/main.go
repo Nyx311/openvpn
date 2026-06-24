@@ -623,11 +623,13 @@ func main() {
 
 		if remember7d == "on" {
 			session.Options(sessions.Options{
-				MaxAge: 3600 * 24 * 7,
+				HttpOnly: true,
+				MaxAge:   3600 * 24 * 7,
 			})
 		} else {
 			session.Options(sessions.Options{
-				MaxAge: 3600 * 1,
+				HttpOnly: true,
+				MaxAge:   3600 * 1,
 			})
 		}
 
@@ -646,7 +648,6 @@ func main() {
 				}
 			}
 
-			fmt.Println(33333333, adminPassword, u.Password)
 			if bcrypt.CompareHashAndPassword([]byte(adminPassword), []byte(u.Password)) == nil {
 				session.Set("user", u.Username)
 				session.Save()
@@ -1054,6 +1055,20 @@ func main() {
 			c.JSON(http.StatusOK, u.Get(c.Param("id")))
 		})
 
+		r.GET("/user/template", func(c *gin.Context) {
+			c.Header("Content-Type", "text/csv")
+			c.Header("Content-Disposition", "attachment; filename=user_template.csv")
+
+			c.Writer.Write([]byte{0xEF, 0xBB, 0xBF})
+
+			writer := csv.NewWriter(c.Writer)
+			defer writer.Flush()
+
+			writer.Write([]string{"username", "password", "name", "email", "is_enable", "expire_date", "ip_addr", "ovpn_config"})
+			writer.Write([]string{"zhangsan", "123456", "张三", "zhangsan@example.com", "1", "2025-12-01/00:00:00", "10.8.0.222", "tt-gz.ovpn"})
+			writer.Write([]string{"lisi", "123456", "李四", "lisi@example.com", "0", "", "", "tt-sh.ovpn"})
+		})
+
 		ovpn.GET("/user/export", func(c *gin.Context) {
 			gid := c.Query("gid")
 
@@ -1151,7 +1166,7 @@ func main() {
 					return
 				}
 
-				if len(header) != 7 {
+				if len(header) != 8 {
 					c.JSON(http.StatusInternalServerError, gin.H{"message": "导入文件格式错误"})
 					return
 				}
@@ -1167,16 +1182,17 @@ func main() {
 						return
 					}
 
-					enable := record[3] == "1"
+					enable := record[4] == "1"
 					gid64, err := strconv.ParseUint(gid, 10, 64)
 					u := User{
 						Username:   record[0],
 						Password:   record[1],
 						Name:       record[2],
+						Email:      record[3],
 						IsEnable:   &enable,
-						ExpireDate: strings.Replace(record[4], "/", " ", 1),
-						IpAddr:     record[5],
-						OvpnConfig: record[6],
+						ExpireDate: strings.Replace(record[5], "/", " ", 1),
+						IpAddr:     record[6],
+						OvpnConfig: record[7],
 						Gid:        uint(gid64),
 					}
 
@@ -1195,9 +1211,9 @@ func main() {
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"message": err.Error()})
 			} else {
-				go func() {
-					sendNotifyEmail := c.PostForm("sendNotifyEmail")
-					if sendNotifyEmail == "true" {
+				sendNotifyEmail := c.PostForm("sendNotifyEmail")
+				if sendNotifyEmail == "true" {
+					go func() {
 						var tpl *template.Template
 						var buf bytes.Buffer
 
@@ -1224,8 +1240,8 @@ func main() {
 						}
 
 						sendEmail(u.Email, "用户开通通知", buf.String())
-					}
-				}()
+					}()
+				}
 
 				c.JSON(http.StatusOK, gin.H{"message": "添加用户成功"})
 			}
@@ -1251,13 +1267,13 @@ func main() {
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"message": err.Error()})
 			} else {
-				go func() {
-					var cu User
-					db.First(&cu, u.ID)
+				sendNotifyEmail := c.PostForm("sendNotifyEmail")
+				if sendNotifyEmail == "true" {
+					go func() {
+						var cu User
+						db.First(&cu, u.ID)
 
-					if cu.Email != "" {
-						sendNotifyEmail := c.PostForm("sendNotifyEmail")
-						if sendNotifyEmail == "true" {
+						if cu.Email != "" {
 							var tpl *template.Template
 							var buf bytes.Buffer
 
@@ -1284,11 +1300,11 @@ func main() {
 							}
 
 							sendEmail(cu.Email, "用户密码重置通知", buf.String())
+						} else {
+							logger.Error(context.Background(), "发送邮件通知失败，用户没有配置邮箱地址")
 						}
-					} else {
-						logger.Error(context.Background(), "发送邮件通知失败，用户没有配置邮箱地址")
-					}
-				}()
+					}()
+				}
 
 				c.JSON(http.StatusOK, gin.H{"message": "用户更新成功"})
 			}
@@ -1333,6 +1349,8 @@ func main() {
 		ovpn.GET("/client/:name/ccd", func(c *gin.Context) {
 			name := c.Param("name")
 			ccdDir := filepath.Join(ovData, "ccd")
+
+			os.MkdirAll(ccdDir, 0755)
 
 			ccdRoot, err := os.OpenRoot(ccdDir)
 			if err != nil {
@@ -1421,8 +1439,6 @@ func main() {
 			content := c.PostForm("content")
 			clientsDir := filepath.Join(ovData, "clients")
 
-			os.MkdirAll(clientsDir, 0755)
-
 			clientsRoot, err := os.OpenRoot(clientsDir)
 			if err != nil {
 				logger.Error(context.Background(), err.Error())
@@ -1450,6 +1466,9 @@ func main() {
 			day := c.PostForm("day")
 
 			clientsDir := filepath.Join(ovData, "clients")
+
+			os.MkdirAll(clientsDir, 0755)
+
 			clientsRoot, err := os.OpenRoot(clientsDir)
 			if err != nil {
 				logger.Error(context.Background(), err.Error())
@@ -1813,7 +1832,7 @@ func main() {
 			if !vaild {
 				c.JSON(http.StatusInternalServerError, gin.H{"message": "验证码错误"})
 			} else {
-				u.Update()
+				db.Model(&User{}).Where("id = ?", u.ID).Update("mfa_secret", u.MfaSecret)
 				c.JSON(http.StatusOK, gin.H{"message": "MFA已启用"})
 			}
 		})
