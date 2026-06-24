@@ -1508,7 +1508,7 @@ func main() {
 			cmd := exec.Command("easyrsa", "--batch", "revoke", name)
 			out, err := cmd.CombinedOutput()
 			if err == nil {
-				cmd = exec.Command("easyrsa", "gen-crl")
+				cmd = exec.Command("easyrsa", "--days=36500", "gen-crl")
 				if out, err = cmd.CombinedOutput(); err != nil {
 					logger.Error(context.Background(), string(out))
 					c.JSON(http.StatusInternalServerError, gin.H{"message": "更新CRL证书失败"})
